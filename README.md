@@ -192,13 +192,14 @@ Open <http://localhost:8787> (WebUI) and <http://localhost:9119> (dashboard).
 
 [`entrypoint.sh`](entrypoint.sh):
 
-1. Seeds `${HERMES_HOME}/config.yaml` from the bundled [`config.default.yaml`](config.default.yaml) on first boot only.
-2. Starts `hermes gateway run` in the background on loopback `:8642`.
-3. Waits up to 30 s for `:8642` to accept TCP connections (bash `/dev/tcp` probe — no `/health` round-trip required).
-4. Starts `hermes dashboard --host 0.0.0.0 --insecure` in the background on `:9119`.
-5. Execs the upstream WebUI startup (`/home/hermeswebui/docker_init.bash`), which finally runs `python server.py` on `:8787`.
+1. Seeds `${HERMES_HOME}/config.yaml` from the bundled [`config.default.yaml`](config.default.yaml) on first boot only, then `chown`s `${HERMES_HOME}` to `hermeswebui:hermeswebui` so the upstream init script's UID-detection finds a consistent owner.
+2. `runuser -u hermeswebui --` `hermes gateway run` — backgrounded. The gateway only binds `:8642` when at least one messaging platform is enabled (which needs a token + allowlist env var); on a fresh deploy without those, the gateway runs idle and prints a "No messaging platforms enabled" warning. That's expected and harmless.
+3. `runuser -u hermeswebui --` `hermes dashboard --host 0.0.0.0 --insecure` — backgrounded on `:9119`. The dashboard tolerates the gateway being unavailable and retries health probes on its own.
+4. `exec /hermeswebui_init.bash` — the upstream WebUI init script. It does the root → `hermeswebui` UID/GID alignment, syncs `/apptoo` → `/app`, creates the `/app/venv` virtualenv, installs the hermes-agent source from `/opt/hermes`, and finally runs `python server.py` on `:8787`.
 
 SIGTERM/SIGINT received by PID 1 fans out to the gateway and dashboard children before the WebUI's own shutdown.
+
+Both supervised processes run as the `hermeswebui` user (UID 1024) so file ownership stays consistent with the WebUI process that takes over PID 1 — gateway and dashboard would otherwise write state into `${HERMES_HOME}` as root and lock the WebUI out.
 
 > Railway's healthcheck is intentionally left at TCP level (no `healthcheckPath` in [`railway.json`](railway.json)). The WebUI's `/health` endpoint exists but the WebUI's startup (auto-installing agent deps, recovering sessions, starting the gateway watcher) can exceed Railway's 30 s healthcheck window on a cold boot, which would cause unnecessary restart loops. TCP-level healthcheck against the container port is enough to detect a crash.
 

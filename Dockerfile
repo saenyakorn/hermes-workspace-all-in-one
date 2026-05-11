@@ -38,12 +38,10 @@ RUN if command -v uv >/dev/null 2>&1; then \
         pip install --no-cache-dir /opt/hermes; \
     fi
 
-# curl is required by the entrypoint health probe; install if missing.
-RUN if ! command -v curl >/dev/null 2>&1; then \
-        (apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*) \
-        || (apk add --no-cache curl) \
-        || true; \
-    fi
+# Bundled default config.yaml — seeded into ~/.hermes/config.yaml on first
+# boot by entrypoint.sh. Kept outside any volume mount path so it survives
+# volume-backed redeploys and can be refreshed by rebuilding the image.
+COPY config.default.yaml /opt/hermes-defaults/config.yaml
 
 # Bind on all interfaces — Railway proxies into the container by IP, not loopback.
 ENV HERMES_WEBUI_HOST=0.0.0.0 \
@@ -56,7 +54,7 @@ ENV HERMES_WEBUI_HOST=0.0.0.0 \
 # Process supervisor that runs gateway + dashboard + webui in one container.
 COPY entrypoint.sh /usr/local/bin/hermes-entrypoint.sh
 RUN chmod +x /usr/local/bin/hermes-entrypoint.sh \
-    && chown -R hermeswebui:hermeswebui /home/hermeswebui/.hermes 2>/dev/null || true
+    && chown -R hermeswebui:hermeswebui /home/hermeswebui/.hermes /opt/hermes-defaults 2>/dev/null || true
 
 EXPOSE 8787 9119
 

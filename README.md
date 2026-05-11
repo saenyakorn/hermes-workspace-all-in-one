@@ -16,9 +16,10 @@ Single-container Railway template that bundles [Hermes Agent](https://github.com
 
 ```
 .
-├── Dockerfile          # multi-stage build: agent source → webui image
-├── entrypoint.sh       # boots gateway + dashboard + webui in one container
-├── railway.json        # Railway build/deploy config
+├── Dockerfile             # multi-stage build: agent source → webui image
+├── entrypoint.sh          # boots gateway + dashboard + webui in one container
+├── config.default.yaml    # seeded into ~/.hermes/config.yaml on first boot
+├── railway.json           # Railway build/deploy config
 ├── .dockerignore
 └── README.md
 ```
@@ -45,13 +46,66 @@ Single-container Railway template that bundles [Hermes Agent](https://github.com
 | `OPENROUTER_API_KEY`     |           | OpenRouter (200+ models, free tier available).                                                         |
 | `GOOGLE_API_KEY`         |           | Gemini.                                                                                                |
 
+### Messaging gateway environment variables
+
+The bundled [`config.default.yaml`](config.default.yaml) pre-wires sensible Telegram and Discord settings; you only need to supply the bot token **and** the user allowlist. Both gateways are **deny-all by default** — without the allowed-users variable nobody can talk to the bot.
+
+#### Telegram ([docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram))
+
+| Variable                  | Required?                                    | Notes                                                                                                                                          |
+| ------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN`      | Yes                                          | From [@BotFather](https://t.me/BotFather) → `/newbot`.                                                                                         |
+| `TELEGRAM_ALLOWED_USERS`  | Yes                                          | Comma-separated numeric user IDs from [@userinfobot](https://t.me/userinfobot). Without this, the bot ignores everyone.                        |
+| `TELEGRAM_WEBHOOK_URL`    | Recommended on Railway                       | Public HTTPS URL (e.g. `https://your-service.up.railway.app/telegram`). Switches Telegram from polling to webhook mode so the service can idle. |
+| `TELEGRAM_WEBHOOK_SECRET` | **Required** when `TELEGRAM_WEBHOOK_URL` set | Run `openssl rand -hex 32`. Gateway refuses to start without it ([GHSA-3vpc-7q5r-276h](https://github.com/NousResearch/hermes-agent/security/advisories/GHSA-3vpc-7q5r-276h)). |
+| `TELEGRAM_HOME_CHANNEL`   | No                                           | Chat ID for cron / proactive messages. DM chat ID = your user ID; group IDs are negative.                                                      |
+
+Before adding the bot to a group, disable BotFather privacy mode (`/mybots → Bot Settings → Group Privacy → Turn off`) **and** remove/re-add the bot so the new privacy state takes effect.
+
+#### Discord ([docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/discord))
+
+| Variable                | Required?                                     | Notes                                                                                                                                  |
+| ----------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `DISCORD_BOT_TOKEN`     | Yes                                           | From <https://discord.com/developers/applications> → Bot → Reset Token.                                                                |
+| `DISCORD_ALLOWED_USERS` | Yes (or `DISCORD_ALLOWED_ROLES`)              | Comma-separated user IDs. Right-click your name → Copy User ID (Developer Mode on). Without either of these, the gateway denies all users. |
+| `DISCORD_ALLOWED_ROLES` | Alternative to `DISCORD_ALLOWED_USERS`        | Comma-separated role IDs — any member with one of these roles is authorized. Auto-enables the Server Members Intent.                   |
+| `DISCORD_HOME_CHANNEL`  | No                                            | Channel ID for cron / proactive messages.                                                                                              |
+
+In the Discord Developer Portal → Bot → Privileged Gateway Intents, you must enable **Message Content Intent** (otherwise the bot sees empty messages) and **Server Members Intent** (required if you use `DISCORD_ALLOWED_ROLES`). Use permissions integer `274878286912` when generating the invite URL.
+
+#### Other platforms
+
+| Variable          | Notes                                                                       |
+| ----------------- | --------------------------------------------------------------------------- |
+| `SLACK_BOT_TOKEN` | Optional — same flow for Slack. See upstream docs for the full env-var set. |
+
+The gateway starts inside the container at boot; once a token + allowlist are set, the corresponding platform is live.
+
 ### Optional environment variables
 
-| Variable                         | Default                | Notes                                                       |
-| -------------------------------- | ---------------------- | ----------------------------------------------------------- |
-| `HERMES_WEBUI_DEFAULT_MODEL`     | `openai/gpt-5.4-mini`  | Default model the WebUI selects on first launch.            |
-| `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace`          | Default workspace path the WebUI opens.                     |
-| `HERMES_HOME`                    | `/home/hermeswebui/.hermes` | Where state, sessions, skills, and config live.        |
+| Variable                         | Default                     | Notes                                                       |
+| -------------------------------- | --------------------------- | ----------------------------------------------------------- |
+| `HERMES_WEBUI_DEFAULT_MODEL`     | `openai/gpt-5.4-mini`       | Default model the WebUI selects on first launch.            |
+| `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace`               | Default workspace path the WebUI opens.                     |
+| `HERMES_HOME`                    | `/home/hermeswebui/.hermes` | Where state, sessions, skills, and config live.             |
+
+---
+
+## Default configuration
+
+[`config.default.yaml`](config.default.yaml) is baked into the image at `/opt/hermes-defaults/config.yaml`. On first boot (when `~/.hermes/config.yaml` does not yet exist) [`entrypoint.sh`](entrypoint.sh) copies it to `${HERMES_HOME}/config.yaml`. On subsequent boots — and any boot where you've mounted a volume containing an existing `config.yaml` — the file is left alone.
+
+The bundled defaults wire up:
+
+- `model.provider: "auto"` — picks the first matching `*_API_KEY` env var.
+- Telegram defaults: `require_mention: true`, `pretty_tables: true`, reactions off. Webhook mode is recommended on Railway (see env vars above).
+- Discord defaults: `require_mention: true`, `auto_thread: true`, reactions on, safe `allow_mentions` (no `@everyone` / `@role` pings even if the model produces those tokens).
+- `group_sessions_per_user: true` — Alice and Bob in the same room get isolated sessions.
+- `session_reset` on either 24 h idle or daily 4 AM boundary — keeps Telegram / Discord context bounded.
+- Curated `platform_toolsets` (`hermes-telegram`, `hermes-discord`) so the bot can run terminal, file, web, vision, image-gen, browser, skills, todo, and cron tools out of the box.
+- Memory + skill auto-nudge intervals (10 and 15 turns).
+
+To customize, either edit the file in your fork before redeploying (changes the seed) or edit `${HERMES_HOME}/config.yaml` directly via Hermes Control Center / SSH (changes the live config).
 
 ---
 
@@ -138,12 +192,15 @@ Open <http://localhost:8787> (WebUI) and <http://localhost:9119> (dashboard).
 
 [`entrypoint.sh`](entrypoint.sh):
 
-1. Starts `hermes gateway run` in the background on loopback `:8642`.
-2. Waits up to 30 s for `GET /health` to return `200`.
-3. Starts `hermes dashboard --host 0.0.0.0 --insecure` in the background on `:9119`.
-4. Execs the upstream WebUI startup (`/home/hermeswebui/docker_init.bash`), which finally runs `python server.py` on `:8787`.
+1. Seeds `${HERMES_HOME}/config.yaml` from the bundled [`config.default.yaml`](config.default.yaml) on first boot only.
+2. Starts `hermes gateway run` in the background on loopback `:8642`.
+3. Waits up to 30 s for `:8642` to accept TCP connections (bash `/dev/tcp` probe — no `/health` round-trip required).
+4. Starts `hermes dashboard --host 0.0.0.0 --insecure` in the background on `:9119`.
+5. Execs the upstream WebUI startup (`/home/hermeswebui/docker_init.bash`), which finally runs `python server.py` on `:8787`.
 
 SIGTERM/SIGINT received by PID 1 fans out to the gateway and dashboard children before the WebUI's own shutdown.
+
+> Railway's healthcheck is intentionally left at TCP level (no `healthcheckPath` in [`railway.json`](railway.json)). The WebUI's `/health` endpoint exists but the WebUI's startup (auto-installing agent deps, recovering sessions, starting the gateway watcher) can exceed Railway's 30 s healthcheck window on a cold boot, which would cause unnecessary restart loops. TCP-level healthcheck against the container port is enough to detect a crash.
 
 ---
 

@@ -57,12 +57,31 @@ Single-container Railway template that bundles [Hermes Agent](https://github.com
 
 ## State persistence
 
-All state — sessions, skills, memory, MCP config, credentials — lives under `~/.hermes`, which maps to `/home/hermeswebui/.hermes` inside the container. To survive redeploys:
+**Mount path: `/home/hermeswebui/.hermes`**
 
-1. In Railway: **Settings → Volumes → New Volume**.
-2. Mount path: `/home/hermeswebui/.hermes`.
+All Hermes state lives under `~/.hermes`, which maps to `/home/hermeswebui/.hermes` inside the container. A single Railway volume at this path persists everything across redeploys:
 
-Without a volume, every redeploy starts from an empty state.
+| Subpath                                  | What's in it                                          |
+| ---------------------------------------- | ----------------------------------------------------- |
+| `/home/hermeswebui/.hermes/config.yaml`  | Provider / model / profile config                     |
+| `/home/hermeswebui/.hermes/.env`         | Credentials (provider API keys written by onboarding) |
+| `/home/hermeswebui/.hermes/sessions/`    | Conversation history                                  |
+| `/home/hermeswebui/.hermes/skills/`      | User-created and auto-learned skills                  |
+| `/home/hermeswebui/.hermes/memory/`      | `MEMORY.md`, `USER.md`, agent notes                   |
+| `/home/hermeswebui/.hermes/mcp/`         | MCP server registrations                              |
+| `/home/hermeswebui/.hermes/hermes-agent/`| Symlink to the bundled agent source (`/opt/hermes`)   |
+| `/home/hermeswebui/.hermes/webui/`       | WebUI state — settings, workspaces, last-session, projects |
+
+### Add the volume
+
+1. In Railway: **Settings → Volumes → Add Volume**.
+2. **Mount path**: `/home/hermeswebui/.hermes`
+3. **Size**: 1 GB is plenty for typical use; bump if you store large workspaces or many sessions.
+4. Redeploy. The container picks up the volume on next boot.
+
+> Without a volume, every redeploy starts from an empty state (you'll re-run onboarding and lose all sessions / skills / memory).
+
+> The bundled agent source lives at `/opt/hermes` and is reinstalled on every build, so you do **not** need to put it on the volume — the `hermes-agent` symlink inside `~/.hermes` points to the image-baked copy.
 
 ---
 

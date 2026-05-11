@@ -1,0 +1,12 @@
+.git
+.gitignore
+.cursor
+.cursorignore
+*.md
+*.plan.md
+node_modules
+__pycache__
+*.pyc
+.env
+.env.*
+.DS_Store

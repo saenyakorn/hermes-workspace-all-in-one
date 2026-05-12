@@ -1,214 +1,56 @@
-# Hermes All-in-One — Railway Template
+# Hermes Agent + WebUI (Railway, single container)
 
-Single-container Railway template that bundles [Hermes Agent](https://github.com/NousResearch/hermes-agent) (gateway only) and [Hermes WebUI](https://github.com/nesquena/hermes-webui) into one image, built from one `Dockerfile`.
+This repository is a **Railway-ready template**: one Docker image and one running process that serves **[Hermes WebUI](https://github.com/nesquena/hermes-webui)** while using the same Python environment as **[Hermes Agent](https://github.com/nousresearch/hermes-agent)** from the official agent image. The WebUI talks to the agent in-process; there is no separate agent container.
 
-| Port | Service                | Exposure         |
-| ---- | ---------------------- | ---------------- |
-| 8787 | Hermes WebUI (browser) | Public (primary) |
+## Architecture
 
-> The WebUI imports the agent as a Python package in-process, so a single container is the correct topology on Railway (Railway services can't share Docker volumes the way the upstream `docker-compose.three-container.yml` does).
-
----
-
-## Repo layout
-
-```
-.
-├── Dockerfile             # multi-stage build: agent source → webui image
-├── entrypoint.sh          # boots gateway + webui in one container
-├── config.default.yaml    # seeded into ~/.hermes/config.yaml on first boot
-├── railway.json           # Railway build/deploy config
-├── .dockerignore
-└── README.md
-```
-
----
+- **Base image:** [`nousresearch/hermes-agent`](https://hub.docker.com/r/nousresearch/hermes-agent) on Docker Hub (`HERMES_AGENT_VERSION`, default `latest`). Agent code and venv live under `/opt/hermes` (venv: `/opt/hermes/.venv`).
+- **WebUI:** Files are copied at build time from **`ghcr.io/nesquena/hermes-webui`** (tag from `HERMES_WEBUI_VERSION`, default `latest`) into **`/app`**; `requirements.txt` is installed **into the agent venv** so one interpreter runs `server.py` with full agent capabilities.
+- **Startup:** The upstream agent `ENTRYPOINT` (`tini` + `docker/entrypoint.sh`) still runs first to bootstrap `$HERMES_HOME` (default `/opt/data`) on disk. Then [`docker/railway-webui.sh`](docker/railway-webui.sh) starts the WebUI, binding to `0.0.0.0` and **Railway’s `PORT`**.
+- **Hermes config:** On first boot, when `config.yaml` is missing under the data volume, the agent entrypoint copies the upstream `cli-config.yaml.example` from the Hermes Agent image. Customize `config.yaml` in the volume (or via the WebUI) as needed.
 
 ## Deploy on Railway
 
-1. Fork (or import) this repo on GitHub.
-2. In Railway: **New Project → Deploy from GitHub** → pick the fork.
-3. Railway reads [`railway.json`](railway.json), builds the [`Dockerfile`](Dockerfile), and starts the service.
-4. Go to **Settings → Networking** and generate a public domain targeting port `8787` (Hermes WebUI).
-5. Set the required env vars below under **Variables**, then redeploy.
+1. Create a **new project** and deploy **from this GitHub repository** (or push this repo and connect it).
+2. Railway will use [`railway.json`](railway.json): Dockerfile builder, root `Dockerfile`.
+3. Add a **volume** on the Web service, mount path **`/opt/data`**. This persists Hermes home (config, memory, skills, sessions) and WebUI state (`/opt/data/webui` by default).
+4. Set **environment variables** (at minimum one LLM provider key, e.g. `ANTHROPIC_API_KEY`). See [Hermes Agent environment docs](https://hermes-agent.nousresearch.com/).
+5. For any **public** URL, set a strong **`HERMES_WEBUI_PASSWORD`** (optional password auth in the WebUI).
 
-### Required environment variables
+Health checks use `GET /health` on the bound port (`PORT` or `8787`).
 
-| Variable                 | Required? | Notes                                                                                                  |
-| ------------------------ | --------- | ------------------------------------------------------------------------------------------------------ |
-| `HERMES_WEBUI_PASSWORD`  | Yes       | Hermes WebUI's fail-closed guard requires this whenever it binds non-loopback. Pick a strong value.    |
-| `ANTHROPIC_API_KEY`      | At least one provider key | Anthropic Claude.                                                                       |
-| `OPENAI_API_KEY`         |           | OpenAI / o-series.                                                                                     |
-| `OPENROUTER_API_KEY`     |           | OpenRouter (200+ models, free tier available).                                                         |
-| `GOOGLE_API_KEY`         |           | Gemini.                                                                                                |
+## Build arguments
 
-### Messaging gateway environment variables
+| Build arg | Default | Meaning |
+|-----------|---------|---------|
+| `HERMES_AGENT_VERSION` | `latest` | Docker Hub tag for `nousresearch/hermes-agent` |
+| `HERMES_WEBUI_VERSION` | `latest` | Tag for `ghcr.io/nesquena/hermes-webui` (e.g. `latest` or `v0.51.50`) |
 
-The bundled [`config.default.yaml`](config.default.yaml) pre-wires sensible Telegram and Discord settings; you only need to supply the bot token **and** the user allowlist. Both gateways are **deny-all by default** — without the allowed-users variable nobody can talk to the bot.
+The WebUI sources are **copied from the published container image** (`FROM ghcr.io/nesquena/hermes-webui:${HERMES_WEBUI_VERSION}`); this repo does not clone the WebUI git repository at build time.
 
-#### Telegram ([docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram))
+Configure these under **Service → Settings → Build → Docker Build Args** (or in `railway.json` under `build.args`). Pin versions for reproducible deploys.
 
-| Variable                  | Required?                                    | Notes                                                                                                                                          |
-| ------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TELEGRAM_BOT_TOKEN`      | Yes                                          | From [@BotFather](https://t.me/BotFather) → `/newbot`.                                                                                         |
-| `TELEGRAM_ALLOWED_USERS`  | Yes                                          | Comma-separated numeric user IDs from [@userinfobot](https://t.me/userinfobot). Without this, the bot ignores everyone.                        |
-| `TELEGRAM_WEBHOOK_URL`    | Recommended on Railway                       | Public HTTPS URL (e.g. `https://your-service.up.railway.app/telegram`). Switches Telegram from polling to webhook mode so the service can idle. |
-| `TELEGRAM_WEBHOOK_SECRET` | **Required** when `TELEGRAM_WEBHOOK_URL` set | Run `openssl rand -hex 32`. Gateway refuses to start without it ([GHSA-3vpc-7q5r-276h](https://github.com/NousResearch/hermes-agent/security/advisories/GHSA-3vpc-7q5r-276h)). |
-| `TELEGRAM_HOME_CHANNEL`   | No                                           | Chat ID for cron / proactive messages. DM chat ID = your user ID; group IDs are negative.                                                      |
-
-Before adding the bot to a group, disable BotFather privacy mode (`/mybots → Bot Settings → Group Privacy → Turn off`) **and** remove/re-add the bot so the new privacy state takes effect.
-
-#### Discord ([docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/discord))
-
-| Variable                | Required?                                     | Notes                                                                                                                                  |
-| ----------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `DISCORD_BOT_TOKEN`     | Yes                                           | From <https://discord.com/developers/applications> → Bot → Reset Token.                                                                |
-| `DISCORD_ALLOWED_USERS` | Yes (or `DISCORD_ALLOWED_ROLES`)              | Comma-separated user IDs. Right-click your name → Copy User ID (Developer Mode on). Without either of these, the gateway denies all users. |
-| `DISCORD_ALLOWED_ROLES` | Alternative to `DISCORD_ALLOWED_USERS`        | Comma-separated role IDs — any member with one of these roles is authorized. Auto-enables the Server Members Intent.                   |
-| `DISCORD_HOME_CHANNEL`  | No                                            | Channel ID for cron / proactive messages.                                                                                              |
-
-In the Discord Developer Portal → Bot → Privileged Gateway Intents, you must enable **Message Content Intent** (otherwise the bot sees empty messages) and **Server Members Intent** (required if you use `DISCORD_ALLOWED_ROLES`). Use permissions integer `274878286912` when generating the invite URL.
-
-#### Other platforms
-
-| Variable          | Notes                                                                       |
-| ----------------- | --------------------------------------------------------------------------- |
-| `SLACK_BOT_TOKEN` | Optional — same flow for Slack. See upstream docs for the full env-var set. |
-
-The gateway starts inside the container at boot; once a token + allowlist are set, the corresponding platform is live.
-
-### Optional environment variables
-
-| Variable                         | Default                     | Notes                                                       |
-| -------------------------------- | --------------------------- | ----------------------------------------------------------- |
-| `HERMES_WEBUI_DEFAULT_MODEL`     | `openai/gpt-5.4-mini`       | Default model the WebUI selects on first launch.            |
-| `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace`               | Default workspace path the WebUI opens.                     |
-| `HERMES_HOME`                    | `/home/hermeswebui/.hermes` | Where state, sessions, skills, and config live.             |
-
----
-
-## Default configuration
-
-[`config.default.yaml`](config.default.yaml) is baked into the image at `/opt/hermes-defaults/config.yaml`. On first boot (when `~/.hermes/config.yaml` does not yet exist) [`entrypoint.sh`](entrypoint.sh) copies it to `${HERMES_HOME}/config.yaml`. On subsequent boots — and any boot where you've mounted a volume containing an existing `config.yaml` — the file is left alone.
-
-The bundled defaults wire up:
-
-- `model.provider: "auto"` — picks the first matching `*_API_KEY` env var.
-- Telegram defaults: `require_mention: true`, `pretty_tables: true`, reactions off. Webhook mode is recommended on Railway (see env vars above).
-- Discord defaults: `require_mention: true`, `auto_thread: true`, reactions on, safe `allow_mentions` (no `@everyone` / `@role` pings even if the model produces those tokens).
-- `group_sessions_per_user: true` — Alice and Bob in the same room get isolated sessions.
-- `session_reset` on either 24 h idle or daily 4 AM boundary — keeps Telegram / Discord context bounded.
-- Curated `platform_toolsets` (`hermes-telegram`, `hermes-discord`) so the bot can run terminal, file, web, vision, image-gen, browser, skills, todo, and cron tools out of the box.
-- Memory + skill auto-nudge intervals (10 and 15 turns).
-
-To customize, either edit the file in your fork before redeploying (changes the seed) or edit `${HERMES_HOME}/config.yaml` directly through the WebUI (changes the live config).
-
----
-
-## State persistence
-
-**Mount path: `/home/hermeswebui/.hermes`**
-
-All Hermes state lives under `~/.hermes`, which maps to `/home/hermeswebui/.hermes` inside the container. A single Railway volume at this path persists everything across redeploys:
-
-| Subpath                                  | What's in it                                          |
-| ---------------------------------------- | ----------------------------------------------------- |
-| `/home/hermeswebui/.hermes/config.yaml`  | Provider / model / profile config                     |
-| `/home/hermeswebui/.hermes/.env`         | Credentials (provider API keys written by onboarding) |
-| `/home/hermeswebui/.hermes/sessions/`    | Conversation history                                  |
-| `/home/hermeswebui/.hermes/skills/`      | User-created and auto-learned skills                  |
-| `/home/hermeswebui/.hermes/memory/`      | `MEMORY.md`, `USER.md`, agent notes                   |
-| `/home/hermeswebui/.hermes/mcp/`         | MCP server registrations                              |
-| `/home/hermeswebui/.hermes/hermes-agent/`| Symlink to the bundled agent source (`/opt/hermes`)   |
-| `/home/hermeswebui/.hermes/webui/`       | WebUI state — settings, workspaces, last-session, projects |
-
-### Add the volume
-
-1. In Railway: **Settings → Volumes → Add Volume**.
-2. **Mount path**: `/home/hermeswebui/.hermes`
-3. **Size**: 1 GB is plenty for typical use; bump if you store large workspaces or many sessions.
-4. Redeploy. The container picks up the volume on next boot.
-
-> Without a volume, every redeploy starts from an empty state (you'll re-run onboarding and lose all sessions / skills / memory).
-
-> The bundled agent source lives at `/opt/hermes` and is reinstalled on every build, so you do **not** need to put it on the volume — the `hermes-agent` symlink inside `~/.hermes` points to the image-baked copy.
-
----
-
-## Pinning versions
-
-Both build args default to `latest`. Override them in **Settings → Build → Build Args** to pin a specific upstream tag for reproducible deploys:
-
-| Build arg               | Default | Maps to                                            |
-| ----------------------- | ------- | -------------------------------------------------- |
-| `HERMES_AGENT_VERSION`  | `latest` | `nousresearch/hermes-agent:<tag>` on Docker Hub   |
-| `HERMES_WEBUI_VERSION`  | `latest` | `ghcr.io/nesquena/hermes-webui:<tag>` on GHCR     |
-
-Example pinned values: `HERMES_AGENT_VERSION=v0.13.0`, `HERMES_WEBUI_VERSION=v0.51.46`.
-
----
-
-## Local build & run
+## Local Docker
 
 ```bash
-# Build with defaults (latest of both)
-docker build \
+docker build -t hermes-railway-all-in-one \
   --build-arg HERMES_AGENT_VERSION=latest \
   --build-arg HERMES_WEBUI_VERSION=latest \
-  -t hermes-stack .
+  .
 
-# Run locally
-docker run --rm \
-  -p 8787:8787 \
-  -e HERMES_WEBUI_PASSWORD=change-me \
+docker run --rm -p 8787:8787 -e PORT=8787 \
+  -v hermes-data:/opt/data \
   -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v "$HOME/.hermes-railway:/home/hermeswebui/.hermes" \
-  hermes-stack
+  hermes-railway-all-in-one
 ```
 
-Open <http://localhost:8787>.
-
----
-
-## How it works
-
-```
-┌──────────────────── Single container ────────────────────┐
-│                                                          │
-│  hermes gateway run        (no public port; binds the    │
-│         │                   messaging adapter sockets    │
-│         │                   when a token is configured)  │
-│         │                                                │
-│  hermes-webui  →→→→→→→→→  0.0.0.0:8787   ← Railway public │
-│                                                          │
-└──────────────────────────────────────────────────────────┘
-```
-
-[`entrypoint.sh`](entrypoint.sh):
-
-1. Seeds `${HERMES_HOME}/config.yaml` from the bundled [`config.default.yaml`](config.default.yaml) on first boot only, then `chown`s `${HERMES_HOME}` to `hermeswebui:hermeswebui` so the upstream init script's UID-detection finds a consistent owner.
-2. `runuser -u hermeswebui --` `hermes gateway run` — backgrounded. The gateway only binds when at least one messaging platform is enabled (which needs a token + allowlist env var); on a fresh deploy without those, the gateway runs idle and prints a "No messaging platforms enabled" warning. That's expected and harmless.
-3. `exec /hermeswebui_init.bash` — the upstream WebUI init script. It does the root → `hermeswebui` UID/GID alignment, syncs `/apptoo` → `/app`, creates the `/app/venv` virtualenv, installs the hermes-agent source from `/opt/hermes`, and finally runs `python server.py` on `:8787`.
-
-SIGTERM/SIGINT received by PID 1 propagates to the gateway child before the WebUI's own shutdown.
-
-The supervised gateway runs as the `hermeswebui` user (UID 1024) so file ownership stays consistent with the WebUI process that takes over PID 1 — running it as root would write state into `${HERMES_HOME}` as root and lock the WebUI out.
-
-> Railway's healthcheck is intentionally left at TCP level (no `healthcheckPath` in [`railway.json`](railway.json)). The WebUI's `/health` endpoint exists but the WebUI's startup (auto-installing agent deps, recovering sessions, starting the gateway watcher) can exceed Railway's 30 s healthcheck window on a cold boot, which would cause unnecessary restart loops. TCP-level healthcheck against the container port is enough to detect a crash.
-
----
-
-## Caveats
-
-- `latest` upstream images shift without notice — **pin both build args before going to production**.
-- One container = one restart blast radius. If the gateway crashes, the WebUI loses its messaging-adapter sidecar; rely on the `ON_FAILURE` restart policy in [`railway.json`](railway.json) to recover.
-- The agent image's source layout (`/opt/hermes`) is fixed by the upstream `docker-compose.three-container.yml`; if a future release moves it, update the `COPY --from=agent` line in the [`Dockerfile`](Dockerfile).
-
----
+Open `http://localhost:8787`. For password protection add `-e HERMES_WEBUI_PASSWORD=...`.
 
 ## Upstream projects
 
-- Hermes Agent — <https://github.com/NousResearch/hermes-agent>
-- Hermes WebUI — <https://github.com/nesquena/hermes-webui>
+- Agent: [https://github.com/nousresearch/hermes-agent](https://github.com/nousresearch/hermes-agent)
+- WebUI: [https://github.com/nesquena/hermes-webui](https://github.com/nesquena/hermes-webui)
 
-Licensed MIT, matching both upstreams.
+## License
+
+Hermes Agent and Hermes WebUI have their own licenses (see upstream repos). The scaffolding in this repository follows the same spirit as the projects it packages; add a `LICENSE` file here if you redistribute the combined image.

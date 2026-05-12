@@ -59,5 +59,17 @@ log "starting hermes gateway (as hermeswebui)"
 runuser --preserve-environment -u hermeswebui -- hermes gateway run >/proc/1/fd/1 2>/proc/1/fd/2 &
 GATEWAY_PID=$!
 
+# /hermeswebui_init.bash saves `env | sort` as root and later reloads each line
+# with `export "$key=$value"`. Names that are not valid POSIX shell identifiers
+# (e.g. bash-exported functions as BASH_FUNC_*%%, or odd platform-injected vars)
+# make that export fail with: ": invalid variable name" (upstream ~line 163).
+# Strip them before exec so the round-trip file is never poisoned.
+while IFS= read -r _env_name; do
+  [[ -n "${_env_name}" ]] || continue
+  if [[ ! "${_env_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    unset "${_env_name}" 2>/dev/null || true
+  fi
+done < <(compgen -e)
+
 log "handing off to upstream WebUI init (port ${HERMES_WEBUI_PORT:-8787})"
 exec /hermeswebui_init.bash

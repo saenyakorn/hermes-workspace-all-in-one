@@ -1,12 +1,10 @@
 # Hermes All-in-One — Railway Template
 
-Single-container Railway template that bundles [Hermes Agent](https://github.com/NousResearch/hermes-agent) (gateway + dashboard) and [Hermes WebUI](https://github.com/nesquena/hermes-webui) into one image, built from one `Dockerfile`.
+Single-container Railway template that bundles [Hermes Agent](https://github.com/NousResearch/hermes-agent) (gateway only) and [Hermes WebUI](https://github.com/nesquena/hermes-webui) into one image, built from one `Dockerfile`.
 
 | Port | Service                | Exposure         |
 | ---- | ---------------------- | ---------------- |
 | 8787 | Hermes WebUI (browser) | Public (primary) |
-| 9119 | Hermes Dashboard       | Public (secondary, generate domain manually) |
-| 8642 | Hermes Gateway API     | Internal only    |
 
 > The WebUI imports the agent as a Python package in-process, so a single container is the correct topology on Railway (Railway services can't share Docker volumes the way the upstream `docker-compose.three-container.yml` does).
 
@@ -17,7 +15,7 @@ Single-container Railway template that bundles [Hermes Agent](https://github.com
 ```
 .
 ├── Dockerfile             # multi-stage build: agent source → webui image
-├── entrypoint.sh          # boots gateway + dashboard + webui in one container
+├── entrypoint.sh          # boots gateway + webui in one container
 ├── config.default.yaml    # seeded into ~/.hermes/config.yaml on first boot
 ├── railway.json           # Railway build/deploy config
 ├── .dockerignore
@@ -31,9 +29,7 @@ Single-container Railway template that bundles [Hermes Agent](https://github.com
 1. Fork (or import) this repo on GitHub.
 2. In Railway: **New Project → Deploy from GitHub** → pick the fork.
 3. Railway reads [`railway.json`](railway.json), builds the [`Dockerfile`](Dockerfile), and starts the service.
-4. Go to **Settings → Networking** and generate **two public domains**:
-   - Domain #1 → target port `8787` (Hermes WebUI — the main UI you log into)
-   - Domain #2 → target port `9119` (Hermes Dashboard — monitoring + sessions)
+4. Go to **Settings → Networking** and generate a public domain targeting port `8787` (Hermes WebUI).
 5. Set the required env vars below under **Variables**, then redeploy.
 
 ### Required environment variables
@@ -105,7 +101,7 @@ The bundled defaults wire up:
 - Curated `platform_toolsets` (`hermes-telegram`, `hermes-discord`) so the bot can run terminal, file, web, vision, image-gen, browser, skills, todo, and cron tools out of the box.
 - Memory + skill auto-nudge intervals (10 and 15 turns).
 
-To customize, either edit the file in your fork before redeploying (changes the seed) or edit `${HERMES_HOME}/config.yaml` directly via Hermes Control Center / SSH (changes the live config).
+To customize, either edit the file in your fork before redeploying (changes the seed) or edit `${HERMES_HOME}/config.yaml` directly through the WebUI (changes the live config).
 
 ---
 
@@ -161,17 +157,16 @@ docker build \
   --build-arg HERMES_WEBUI_VERSION=latest \
   -t hermes-stack .
 
-# Run locally — exposes both web (8787) and dashboard (9119)
+# Run locally
 docker run --rm \
   -p 8787:8787 \
-  -p 9119:9119 \
   -e HERMES_WEBUI_PASSWORD=change-me \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -v "$HOME/.hermes-railway:/home/hermeswebui/.hermes" \
   hermes-stack
 ```
 
-Open <http://localhost:8787> (WebUI) and <http://localhost:9119> (dashboard).
+Open <http://localhost:8787>.
 
 ---
 
@@ -180,12 +175,11 @@ Open <http://localhost:8787> (WebUI) and <http://localhost:9119> (dashboard).
 ```
 ┌──────────────────── Single container ────────────────────┐
 │                                                          │
-│  hermes gateway run     127.0.0.1:8642  (internal API)   │
-│         ▲                                                │
-│         │ in-process imports & health probe              │
+│  hermes gateway run        (no public port; binds the    │
+│         │                   messaging adapter sockets    │
+│         │                   when a token is configured)  │
 │         │                                                │
-│  hermes-webui  →→→→→→  0.0.0.0:8787    ← Railway public  │
-│  hermes dashboard →→→  0.0.0.0:9119    ← Railway public  │
+│  hermes-webui  →→→→→→→→→  0.0.0.0:8787   ← Railway public │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -193,13 +187,12 @@ Open <http://localhost:8787> (WebUI) and <http://localhost:9119> (dashboard).
 [`entrypoint.sh`](entrypoint.sh):
 
 1. Seeds `${HERMES_HOME}/config.yaml` from the bundled [`config.default.yaml`](config.default.yaml) on first boot only, then `chown`s `${HERMES_HOME}` to `hermeswebui:hermeswebui` so the upstream init script's UID-detection finds a consistent owner.
-2. `runuser -u hermeswebui --` `hermes gateway run` — backgrounded. The gateway only binds `:8642` when at least one messaging platform is enabled (which needs a token + allowlist env var); on a fresh deploy without those, the gateway runs idle and prints a "No messaging platforms enabled" warning. That's expected and harmless.
-3. `runuser -u hermeswebui --` `hermes dashboard --host 0.0.0.0 --insecure` — backgrounded on `:9119`. The dashboard tolerates the gateway being unavailable and retries health probes on its own.
-4. `exec /hermeswebui_init.bash` — the upstream WebUI init script. It does the root → `hermeswebui` UID/GID alignment, syncs `/apptoo` → `/app`, creates the `/app/venv` virtualenv, installs the hermes-agent source from `/opt/hermes`, and finally runs `python server.py` on `:8787`.
+2. `runuser -u hermeswebui --` `hermes gateway run` — backgrounded. The gateway only binds when at least one messaging platform is enabled (which needs a token + allowlist env var); on a fresh deploy without those, the gateway runs idle and prints a "No messaging platforms enabled" warning. That's expected and harmless.
+3. `exec /hermeswebui_init.bash` — the upstream WebUI init script. It does the root → `hermeswebui` UID/GID alignment, syncs `/apptoo` → `/app`, creates the `/app/venv` virtualenv, installs the hermes-agent source from `/opt/hermes`, and finally runs `python server.py` on `:8787`.
 
-SIGTERM/SIGINT received by PID 1 fans out to the gateway and dashboard children before the WebUI's own shutdown.
+SIGTERM/SIGINT received by PID 1 propagates to the gateway child before the WebUI's own shutdown.
 
-Both supervised processes run as the `hermeswebui` user (UID 1024) so file ownership stays consistent with the WebUI process that takes over PID 1 — gateway and dashboard would otherwise write state into `${HERMES_HOME}` as root and lock the WebUI out.
+The supervised gateway runs as the `hermeswebui` user (UID 1024) so file ownership stays consistent with the WebUI process that takes over PID 1 — running it as root would write state into `${HERMES_HOME}` as root and lock the WebUI out.
 
 > Railway's healthcheck is intentionally left at TCP level (no `healthcheckPath` in [`railway.json`](railway.json)). The WebUI's `/health` endpoint exists but the WebUI's startup (auto-installing agent deps, recovering sessions, starting the gateway watcher) can exceed Railway's 30 s healthcheck window on a cold boot, which would cause unnecessary restart loops. TCP-level healthcheck against the container port is enough to detect a crash.
 
@@ -208,8 +201,7 @@ Both supervised processes run as the `hermeswebui` user (UID 1024) so file owner
 ## Caveats
 
 - `latest` upstream images shift without notice — **pin both build args before going to production**.
-- One container = one restart blast radius. If the gateway crashes, the dashboard and WebUI lose their backing API surface; rely on the `ON_FAILURE` restart policy in [`railway.json`](railway.json) to recover.
-- Railway services only auto-generate one public domain — manually generate the second one for port `9119` if you want browser access to the dashboard.
+- One container = one restart blast radius. If the gateway crashes, the WebUI loses its messaging-adapter sidecar; rely on the `ON_FAILURE` restart policy in [`railway.json`](railway.json) to recover.
 - The agent image's source layout (`/opt/hermes`) is fixed by the upstream `docker-compose.three-container.yml`; if a future release moves it, update the `COPY --from=agent` line in the [`Dockerfile`](Dockerfile).
 
 ---
